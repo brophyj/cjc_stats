@@ -1,0 +1,396 @@
+---
+title: "CJC_stats_paper"
+author: "J Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits=3)
+```
+
+## Load data
+
+Data for EXCEL at 3 and 5 years is entered directly.
+
+```{r results='asis', warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggthemes)
+library(metafor)
+library(meta)
+library(epiR)
+options(dplyr.summarise.inform=FALSE)
+# Load data
+# M=mortality(c,e), N=no. subjects, P=priamry composite, R=primary composite + revas, c=CABG, e=PCI
+excel3 <- c(54, 71, 135, 137, 174, 208, 957, 948)
+excel5 <- c(89, 119, 176, 203, 228, 290, 957, 948)
+```
+
+## Primary outcome
+The first analysis examines the EXCEL primary outcome - death, non-fatal MI, and stroke - at 3 years
+
+```{r}
+# 3 year results
+mat3 <- matrix(c(excel3[3], excel3[4], excel3[7]-excel3[3], excel3[8]-excel3[4]), nrow=2 )
+rownames(mat3) <- c("PCI", "CABG") 
+colnames(mat3) <- c("Event+", "Event-") 
+kable(mat3)
+
+epiR::epi.2by2(mat3, outcome = "as.rows")
+prop.test(c(excel3[3], excel3[4]), c(excel3[7], excel3[8]))
+
+```
+The second analysis examines the EXCEL primary outcome - death, non-fatal MI, and stroke - at 3 years
+```{r}
+# 5 year results
+mat5 <- matrix(c(excel5[3], excel5[4], excel5[7]-excel5[3], excel5[8]-excel5[4]), nrow=2 )
+rownames(mat5) <- c("PCI", "CABG") 
+colnames(mat5) <- c("Event+", "Event-") 
+kable(mat5)
+epiR::epi.2by2(mat5, outcome = "as.rows")
+prop.test(c(excel5[3], excel5[4]), c(excel5[7], excel5[8]))
+
+
+```
+
+## P valve and S curves
+
+There is a `R` package, `concurve`, that contains many useful functions and graphs but I have elected to write my own as they can be more easily customized.
+
+## Functions to map P value function, S values, LR and MLR
+
+```{r}
+
+pv_graph <- function(hr, uci, lci) {
+    se <- (log(uci)-log(lci))/(2*1.65)         
+    x <- seq(0.01, 0.50,by = .005)
+    p1 <- exp(log(hr) - (qnorm(x) * se))
+    p2 <- exp(log(hr) + (qnorm(x) * se))
+    p <- data.frame(x, p2, p1)
+    g <- ggplot(p, aes( p2, x)) +
+        geom_line() +
+        geom_line(aes(p1, x)) +
+        scale_x_continuous(trans='log10') +
+        ylab("p value \n one sided") +
+        xlab("Hazard ratio (Log scale)") +
+        labs (title="P value function") +
+        geom_hline(yintercept=c(.005,.025,0.05,0.10), color = "red") +
+        annotate("text", x=.7,y=.01, label="99% CI") +
+        annotate("text", x=0.74,y=.04, label="95% CI") +
+        annotate("text", x=0.78,y=.06, label="90% CI") +
+        annotate("text", x=.82,y=.11, label="80% CI") +
+        geom_vline(xintercept=1.0, color = "green") +
+        annotate("text", x=1,y=.4, label="null hypothesis") +
+        theme_bw()
+    return(g)
+}
+
+s_graph <- function(hr, uci, lci){
+    se <- (log(uci)-log(lci))/(2*1.65)         #.86 0.72 to 1.04 (log se)
+    x <- seq(0.01, 0.50,by = .005)
+    lci <- exp(log(hr) - (qnorm(x) * se))
+    uci <- exp(log(hr) + (qnorm(x) * se))
+    lci <- rev(lci)
+    hr <- rev(c(uci, lci))
+    yy <- 2*x
+    yy <- c(yy,rev(yy))
+    ss <- -log(yy, base=2)
+    df1 <- data.frame(hr,ss)
+    df1 <- df1[-297,]
+    s <- ggplot(df1, aes( hr,ss)) +
+        geom_line() +
+        xlim(0.01,1.2) +
+        scale_x_continuous(trans='log10') +
+        ylab("Bits of information against HR (binary S value)") +
+        xlab("Hazard ratio (Log scale)") +
+        labs (subtitle = "S-Values (surprisals) for a range of hazard ratios (HR)") +
+        geom_vline(xintercept=1.0, color = "green") +
+        annotate("text", x=1,y=.4, label="null hypothesis") +
+        theme_bw()
+        return(s)
+}
+
+# function to make S dataset (already intrinsically done in pv_graph and s_graph) but this allows it to exported
+
+s.make <- function(h, uci, lci){
+    x <- seq(0.0001, 0.50,length.out = 100)   # p value  x <- seq(0.01, 0.50,by = .005) 
+    se <- (log(uci)-log(lci))/(2*1.65) 
+    p1 <- exp(log(h) - (qnorm(x) * se))
+    p2 <- exp(log(h) + (qnorm(x) * se))
+    p2 <- rev(p2)
+    hr <- rev(c(p1,p2[-1]))
+    prob <- c(2*x, rev(2*x)[-1])
+    s <- -log(prob, base=2)
+    df1 <- data.frame(hr, prob, s)
+    return(df1)
+}
+
+mle <- function(hr, uci, lci, x){
+    d = (log(uci/lci))/(2*(1.96))
+    z = log(hr/x)/d
+    z_sq <-z*z 
+    mle = exp(z_sq/2)
+    return(mle)
+}
+
+lr <- function(hr, uci, lci, x){
+    d = (log(uci/lci))/(2*(1.96))
+    z = log(hr/x)/d
+    z_sq <-z*z 
+    return(z_sq)
+}
+
+
+```
+
+## Stich graphical results at 5 years
+
+```{r}
+# Stich 5 years  #.86 0.72 to 1.04 (log se)
+
+# pv graph
+stich_pv_5 <- pv_graph(0.86, 1.04, 0.72) +
+    labs (title="Stich trial results 2011", 
+          subtitle = "P value function for HR = 0.86, 95% CI 0.72 to 1.04") 
+
+pdf("stich_pv_5.pdf")
+stich_pv_5
+dev.off()
+
+ggsave("stich_pv_5.png")
+stich_pv_5
+
+# S graph
+stich_s_5 <- s_graph(0.86, 1.04, 0.72) +
+  labs(title="Stich trial results 2011") +
+    annotate("text", x=.8,y=1, label="Maximum likelihood estimate (HR=0.86)\n has the least refutational evidence \n against it (0 bits)") +
+    geom_segment(aes(x = .86, y = 0.8, xend = .86, yend = 0.015),
+               arrow = arrow(length = unit(0.5, "cm")),color="red")
+
+pdf("stich_s_5.pdf")
+stich_s_5
+dev.off()
+
+ggsave("stich_s_5.png")
+stich_s_5
+```
+
+## Stich graphical results at 10 years
+
+```{r fig.width=12, fig.height=12}
+
+# Stich 10 years
+
+# pv graph
+stich_pv_10 <- pv_graph(0.84, 0.97, 0.73) +
+    labs (title="Stich trial results 2016", 
+          subtitle = "P value function for HR = 0.84, 95% CI 0.73 to 0.97") 
+
+pdf("stich_pv_10.pdf")
+stich_pv_10
+dev.off()
+
+ggsave("stich_pv_10.png")
+stich_pv_10
+
+# S graph
+stich_s_10 <- s_graph(0.84, 0.97, 0.73) +
+  labs(title="Stich trial results 2016") +
+    annotate("text", x=.8,y=1, label="Maximum likelihood estimate (HR=0.84)\n has the least refutational evidence \n against it (0 bits)") +
+    geom_segment(aes(x = .84, y = 0.8, xend = .84, yend = 0.015),
+               arrow = arrow(length = unit(0.5, "cm")),color="red")
+
+pdf("stich_s_10.pdf")
+stich_s_10
+dev.off()
+
+ggsave("stich_s_10.png")
+stich_s_10
+
+# combining graphs
+library(patchwork)
+
+stich_comb <- stich_pv_5 + stich_s_5 + stich_pv_10 + stich_s_10 +plot_layout(nrow = 2, byrow = TRUE) +
+  plot_annotation(title = 'The surprising story about the Stich trial') + 
+  plot_annotation(tag_levels = 'A')
+
+pdf("stich_comb.pdf")
+stich_comb
+dev.off()
+
+ggsave("stich_comb.png")
+stich_comb
+
+```
+## Stich Tables
+
+```{r}
+stich5 <- s.make(.86, 1.04,.72)
+# make table - values extracted from data frame created from s.make
+hr <- c(1.1, 1.0, 0.9, 0.86, .75)
+pr <- c(0.028, 0.176, 0.68, 1.0, .22)
+s <- -log(pr, base=2)
+df <- data.frame(HR=hr, P=pr,S=s)
+row.names(df) <- (c("10% increase risk", "no association", "10% decrease in risk", "point estimate", "25% decrease in risk"))
+
+df
+kable(df, col.names=c("HR","P value (2 sided)","S")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Stich 5 years" = 4))
+
+z <- qnorm(1-pr/2)
+df$lr <- z^2
+df$mlr <- exp(df$lr/2)
+kable(df, col.names=c("HR","P value (2 sided)","S", "Likelihood ratio", "Maximum likelihood ratio")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Stich 5 years" = 6))
+
+################
+stich10 <- s.make(0.84, 0.97, 0.73)
+hr <- c(1.1, 1.0, 0.9, 0.84, .75)
+pr <- c( .005, 0.08, 0.84, 1.0, .38)
+
+s <- -log(pr, base=2)
+df <- data.frame(HR=hr, P=pr,S=s)
+row.names(df) <- (c("10% increase risk", "no association", "10% decrease in risk", "point estimate", "25% decrease in risk"))
+
+df
+kable(df, col.names=c("HR","P value (2 sided)","S")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Stich 10 years" = 4))
+
+z <- qnorm(1-pr/2)
+df$lr <- z^2
+df$mlr <- exp(df$lr/2)
+kable(df, col.names=c("HR","P value (2 sided)","S", "Likelihood ratio", "Maximum likelihood ratio")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Stich 10 years" = 6))
+
+```
+## Vericigult
+
+```{r}
+pv_graph(0.90, .98, 0.82)
+s_graph(0.90, .98, 0.82)
+
+veri <- s.make(0.90, .98, 0.82)
+# make table - values extracted from data frame created from s.make
+hr <- c(1.1, 1.0, 0.9, 0.80, .74)
+pr <- c(0.0002, 0.0507, 1.0, .03, .0002)
+s <- -log(pr, base=2)
+df <- data.frame(HR=hr, P=pr,S=s)
+row.names(df) <- (c("10% increase risk", "no association", "10% decrease in risk", "point estimate", "25% decrease in risk"))
+
+df
+kable(df, col.names=c("HR","P value (2 sided)","S")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Vericiguat at 10 months" = 4))
+
+z <- qnorm(1-pr/2)
+df$lr <- z^2
+df$mlr <- exp(df$lr/2)
+kable(df, col.names=c("HR","P value (2 sided)","S", "Likelihood ratio", "Maximum likelihood ratio")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Vericiguat at 10 months" = 6))
+
+z_score <- .1/(.16/3.96)
+bf_min <- exp(-(z_score^2)/2)
+
+prob_int <- c(.70,.50,.30)
+odds_in <- prob_int / (1-prob_int)
+odds_post <- odds_in * bf_min
+prob_post <- odds_post / (1+ odds_post)
+
+df_ver <- data.frame(prob_int, odds_in, bf_min, odds_post, prob_post)
+
+kable(df_ver, col.names=c("Inital probability of Ho","Inital odds", "Likelihood ratio", "Posterior odds", "Posterior probability Ho")) %>%
+  kableExtra::kable_styling() %>% 
+  add_header_above(c("Vericiguat at 10 months" = 5))
+```
+
+## Fragility index
+
+```{r}
+# PRAMI example
+dat <- matrix(c(11, 27, 223, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat
+epi.2by2(dat = as.table(dat), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+dat1 <- matrix(c(12, 27, 222, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat1
+epi.2by2(dat = as.table(dat1), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+dat2 <- matrix(c(13, 27, 221, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat2
+epi.2by2(dat = as.table(dat2), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+dat3 <- matrix(c(14, 27, 220, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat3
+epi.2by2(dat = as.table(dat3), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+dat4 <- matrix(c(15, 27, 219, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat4
+epi.2by2(dat = as.table(dat4), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+
+dat5 <- matrix(c(16, 27, 218, 204), nrow=2)
+rownames(dat) <- c("PCI", "No PCI"); colnames(dat) <- c("Dead", "Alive")
+dat5
+epi.2by2(dat = as.table(dat5), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+# STICH deaths 359 and 398
+dat6 <-  matrix(c(359, 398, 251,204), nrow=2) 
+rownames(dat6) <- c("CABG", "Med"); colnames(dat6) <- c("Dead", "Alive")
+dat6
+epi.2by2(dat = as.table(dat6), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+dat7 <-  matrix(c(359, 387, 251,215), nrow=2) 
+rownames(dat7) <- c("CABG", "Med"); colnames(dat7) <- c("Dead", "Alive")
+dat7
+epi.2by2(dat = as.table(dat7), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+```
+
+```{r}
+dat7 <-  matrix(c(41,73827, (1186-41),(9281311-73827)), nrow=2) 
+rownames(dat7) <- c("PPCM + ", "PPCM  "); colnames(dat7) <- c("DM +", "DM -")
+dat7
+epi.2by2(dat = as.table(dat7), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+
+dat7 <-  matrix(c(26, 43422, 625, (5277932-43422)), nrow=2) 
+rownames(dat7) <- c("PPCM + ", "PPCM - "); colnames(dat7) <- c("DM +", "DM -")
+dat7
+epi.2by2(dat = as.table(dat7), method = "cohort.count", 
+         conf.level = 0.95, units = 100, outcome = "as.columns")
+
+```
+
