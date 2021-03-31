@@ -1,1 +1,1 @@
-Contains the code to produce Figure 1 in the CJC publication
+Contains the code to produce figures in CJC publications "Key issues in the statistical interpretation of randomized clinical trials" and "Bayesian analyses of cardiovascular trials - bringing added value to the table"
